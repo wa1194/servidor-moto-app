@@ -18,7 +18,7 @@ app.use(express.urlencoded({ extended: true }));
 // ATENÇÃO: O sistema de arquivos do Render é efêmero. 
 // Arquivos enviados para 'uploads/' serão DELETADOS quando o servidor reiniciar ou dormir.
 // Para produção, o ideal é usar um serviço de storage como AWS S3, Cloudinary, etc.
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 // --- BANCO DE DADOS EM MEMÓRIA (SOMENTE PARA DESENVOLVIMENTO) ---
 // ATENÇÃO: Estes dados serão PERDIDOS toda vez que o servidor no Render reiniciar ou dormir.
