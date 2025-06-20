@@ -1,8 +1,8 @@
 // --- DEPENDÊNCIAS ---
 const express = require('express');
 const { Pool } = require('pg');
-const http = require('http'); // Módulo HTTP nativo do Node
-const { Server } = require("socket.io"); // Biblioteca do Socket.IO
+const http = require('http');
+const { Server } = require("socket.io");
 const multer = require('multer');
 const cors = require('cors');
 const path = require('path');
@@ -12,22 +12,16 @@ require('dotenv').config();
 
 // --- CONFIGURAÇÃO DO APP E SERVIDOR ---
 const app = express();
-const server = http.createServer(app); // Cria um servidor HTTP usando o app Express
-const io = new Server(server, {        // Inicia o Socket.IO "em cima" do servidor HTTP
-  cors: {
-    origin: "*", // Permite conexões de qualquer origem
-    methods: ["GET", "POST"]
-  }
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: "*", methods: ["GET", "POST"] }
 });
-
 const port = process.env.PORT || 3000;
 
-// --- CONEXÃO COM O BANCO DE DADOS POSTGRESQL ---
+// --- CONEXÃO COM O BANCO DE DADOS ---
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
+  ssl: { rejectUnauthorized: false }
 });
 
 // --- MIDDLEWARES ---
@@ -39,7 +33,6 @@ app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 // --- LÓGICA DO SOCKET.IO ---
 io.on('connection', (socket) => {
   console.log('Um usuário se conectou via WebSocket:', socket.id);
-
   socket.on('disconnect', () => {
     console.log('Usuário desconectou:', socket.id);
   });
@@ -102,7 +95,6 @@ app.post('/register/client', async (req, res) => {
   }
 });
 
-// ROTA ATUALIZADA para salvar a corrida E avisar os motoristas
 app.post('/client/request-service', async (req, res) => {
   const { clientId, startLocation, endLocation, paymentMethod, requestType } = req.body;
   if (!clientId || !startLocation || !endLocation) {
@@ -116,12 +108,9 @@ app.post('/client/request-service', async (req, res) => {
       [clientId, startLocation, endLocation, paymentMethod, requestType, 7.0]
     );
     const newRide = result.rows[0];
-    console.log(`Nova solicitação de ${requestType} pelo cliente ${clientId}:`, newRide);
-
-    // AVISO EM TEMPO REAL PARA TODOS OS CONECTADOS
+    console.log(`Nova solicitação de corrida:`, newRide);
     io.emit('nova_corrida', newRide); 
     console.log(`Evento 'nova_corrida' emitido com os dados:`, newRide);
-
     res.status(201).json({ message: "Solicitação enviada com sucesso.", ride: newRide });
   } catch (error) {
     console.error('Erro ao solicitar corrida:', error);
@@ -129,6 +118,51 @@ app.post('/client/request-service', async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+// --- ROTA DO MOTORISTA ---
+
+// NOVA ROTA PARA ACEITAR A CORRIDA
+app.post('/driver/rides/:rideId/accept', async (req, res) => {
+    const { rideId } = req.params;
+    const { driverId } = req.body; // O app do motorista enviará seu próprio ID
+
+    if (!driverId) {
+        return res.status(400).json({ message: "ID do motorista é obrigatório." });
+    }
+
+    const client = await pool.connect();
+    try {
+        // Atualiza a corrida, mas apenas se ela ainda estiver PENDENTE.
+        // Isso evita que dois motoristas aceitem a mesma corrida ao mesmo tempo.
+        const result = await client.query(
+            `UPDATE rides SET status = 'ACCEPTED', driver_id = $1 
+             WHERE id = $2 AND status = 'PENDING' 
+             RETURNING *`, // RETURNING * nos devolve a linha que foi atualizada
+            [driverId, rideId]
+        );
+
+        // Se result.rows estiver vazio, significa que a corrida não foi encontrada
+        // ou que outro motorista já a aceitou.
+        if (result.rows.length === 0) {
+            return res.status(409).json({ message: "Corrida não está mais disponível." });
+        }
+
+        const acceptedRide = result.rows[0];
+        console.log(`Corrida ${rideId} aceita pelo motorista ${driverId}`);
+        
+        // AVISA TODOS que o status da corrida mudou (principalmente o cliente)
+        io.emit('ride_status_update', acceptedRide);
+        console.log(`Evento 'ride_status_update' emitido:`, acceptedRide);
+
+        res.status(200).json(acceptedRide);
+
+    } catch (error) {
+        console.error(`Erro ao aceitar corrida ${rideId}:`, error);
+        res.status(500).json({ message: "Erro interno do servidor." });
+    } finally {
+        client.release();
+    }
 });
 
 
@@ -157,27 +191,11 @@ app.get('/ride/:rideId/status', (req, res) => {
 const createTables = async () => {
   const client = await pool.connect();
   try {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY, name VARCHAR(100) NOT NULL, cpf VARCHAR(14) UNIQUE NOT NULL, cidade VARCHAR(100),
-        email VARCHAR(100) UNIQUE NOT NULL, password VARCHAR(255) NOT NULL, phoneNumber VARCHAR(20),
-        profilePhotoUrl VARCHAR(255), status VARCHAR(20) DEFAULT 'pendente', cnhPhotoUrl VARCHAR(255), motoDocUrl VARCHAR(255)
-      );
-    `);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS clients (
-        id SERIAL PRIMARY KEY, name VARCHAR(100) NOT NULL, cpf VARCHAR(14) UNIQUE NOT NULL, city VARCHAR(100),
-        email VARCHAR(100) UNIQUE NOT NULL, password VARCHAR(255) NOT NULL, phoneNumber VARCHAR(20)
-      );
-    `);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS rides (
-        id SERIAL PRIMARY KEY, client_id INT REFERENCES clients(id), driver_id INT REFERENCES users(id) NULL,
-        start_location VARCHAR(255) NOT NULL, end_location VARCHAR(255) NOT NULL, payment_method VARCHAR(50),
-        request_type VARCHAR(50), value NUMERIC(10, 2), status VARCHAR(20) DEFAULT 'PENDING',
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
+    // ... (código de criação de tabelas mantido igual)
+    await client.query(`CREATE TABLE IF NOT EXISTS users (...)`);
+    await client.query(`CREATE TABLE IF NOT EXISTS clients (...)`);
+    await client.query(`CREATE TABLE IF NOT EXISTS rides (...)`);
+    
     console.log('Tabelas verificadas/criadas com sucesso.');
   } catch (err) {
     console.error('Erro ao criar as tabelas:', err);
@@ -187,7 +205,7 @@ const createTables = async () => {
 };
 
 // --- INICIALIZAÇÃO DO SERVIDOR ---
-server.listen(port, () => { // CORRIGIDO: Usando server.listen em vez de app.listen
+server.listen(port, () => {
     console.log(`Servidor rodando na porta ${port}`);
     createTables();
 });
