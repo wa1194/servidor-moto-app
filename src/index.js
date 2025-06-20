@@ -1,10 +1,11 @@
 // --- DEPENDÊNCIAS ---
 const express = require('express');
-const { Pool } = require('pg'); // Driver para o PostgreSQL
+const { Pool } = require('pg');
 const multer = require('multer');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+const bcrypt = require('bcrypt'); // Biblioteca para segurança de senhas
 require('dotenv').config();
 
 // --- CONFIGURAÇÃO DO APP ---
@@ -23,11 +24,10 @@ const pool = new Pool({
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-// Caminho corrigido para a pasta de uploads
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 
-// --- DADOS TEMPORÁRIOS (SERÃO MOVIDOS PARA O BANCO) ---
+// --- DADOS TEMPORÁRIOS ---
 const admins = [{ 
     id: "admin01", 
     email: process.env.ADMIN_EMAIL || "admin@exemplo.com", 
@@ -36,10 +36,10 @@ const admins = [{
 }];
 
 
-// --- Configuração do Multer (mantida por enquanto) ---
+// --- Configuração do Multer ---
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-        const uploadPath = path.join(__dirname, '..', 'uploads'); // Caminho corrigido
+        const uploadPath = path.join(__dirname, '..', 'uploads');
         fs.mkdirSync(uploadPath, { recursive: true });
         cb(null, uploadPath);
     },
@@ -52,48 +52,78 @@ const upload = multer({ storage: storage });
 
 
 // ==================================================================
-//    ATENÇÃO: AS ROTAS ABAIXO ESTÃO QUEBRADAS TEMPORARIAMENTE
-//    Elas serão reescritas uma a uma para usar o banco de dados.
+//                      ROTAS DA APLICAÇÃO
 // ==================================================================
 
-// --- ROTA DE LOGIN UNIFICADA ---
+// --- ROTAS DO CLIENTE ---
+
+// ROTA ATUALIZADA PARA USAR O BANCO DE DADOS
+app.post('/register/client', async (req, res) => {
+  const { name, email, password, cpf, phoneNumber, city } = req.body;
+
+  // 1. Validação de entrada
+  if (!name || !email || !password || !cpf || !phoneNumber || !city) {
+    return res.status(400).json({ message: "Todos os campos são obrigatórios." });
+  }
+
+  const client = await pool.connect();
+  try {
+    // 2. Segurança: Hashear a senha antes de salvar no banco
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    // 3. Inserir o novo cliente no banco de dados
+    const result = await client.query(
+      'INSERT INTO clients (name, email, password, cpf, phoneNumber, city) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
+      [name, email, hashedPassword, cpf, phoneNumber, city]
+    );
+
+    const newClient = result.rows[0];
+    console.log("Novo cliente cadastrado no BANCO DE DADOS:", newClient);
+    
+    // Remove a senha do objeto antes de enviar de volta para o app
+    delete newClient.password;
+
+    res.status(201).json({ message: "Cadastro realizado com sucesso!", user: newClient });
+
+  } catch (error) {
+    console.error('Erro ao cadastrar cliente:', error);
+    // Verifica se o erro é de violação de chave única (email ou cpf duplicado)
+    if (error.code === '23505') { // Código de erro do PostgreSQL para unique_violation
+      return res.status(409).json({ message: "Email ou CPF já cadastrado." });
+    }
+    res.status(500).json({ message: "Erro interno do servidor." });
+  } finally {
+    client.release(); // Sempre libera o cliente de volta para o pool
+  }
+});
+
+
+// --- ROTAS AINDA EM CONSTRUÇÃO ---
+
 app.post('/auth/login', (req, res) => {
-    // Lógica a ser reescrita com SQL
     return res.status(501).json({ message: "Rota em construção." });
 });
 
-// --- ROTAS DO MOTORISTA ---
 app.post('/register/driver', upload.fields([
-    { name: 'cnhPhoto', maxCount: 1 },
-    { name: 'motoDoc', maxCount: 1 },
-    { name: 'profilePhoto', maxCount: 1 }
+    { name: 'cnhPhoto', maxCount: 1 }, { name: 'motoDoc', maxCount: 1 }, { name: 'profilePhoto', maxCount: 1 }
 ]), (req, res) => {
-    // Lógica a ser reescrita com SQL
     return res.status(501).json({ message: "Rota em construção." });
 });
 
 app.get('/driver/rides', (req, res) => {
-    // Lógica a ser reescrita com SQL
-    return res.status(501).json({ message: "Rota em construção." });
-});
-
-// --- ROTAS DO CLIENTE ---
-app.post('/register/client', (req, res) => {
-    // Lógica a ser reescrita com SQL
     return res.status(501).json({ message: "Rota em construção." });
 });
 
 app.post('/client/request-service', (req, res) => {
-    // Lógica a ser reescrita com SQL
     return res.status(501).json({ message: "Rota em construção." });
 });
 
 app.get('/ride/:rideId/status', (req, res) => {
-    // Lógica a ser reescrita com SQL
     return res.status(501).json({ message: "Rota em construção." });
 });
 
-// ... (O restante das rotas também precisará ser reescrito)
+// ... (Restante das rotas em construção)
 
 
 // --- FUNÇÃO PARA CRIAR TABELAS (SE NÃO EXISTIREM) ---
@@ -158,6 +188,5 @@ const createTables = async () => {
 // --- INICIALIZAÇÃO DO SERVIDOR ---
 app.listen(port, () => {
     console.log(`Servidor rodando na porta ${port}`);
-    // Chama a função para verificar/criar as tabelas ao iniciar
     createTables();
 });
