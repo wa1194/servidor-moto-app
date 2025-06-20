@@ -1,15 +1,25 @@
 // --- DEPENDÊNCIAS ---
 const express = require('express');
 const { Pool } = require('pg');
+const http = require('http'); // Módulo HTTP nativo do Node
+const { Server } = require("socket.io"); // Biblioteca do Socket.IO
 const multer = require('multer');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
-const bcrypt = require('bcrypt'); // Biblioteca para segurança de senhas
+const bcrypt = require('bcrypt');
 require('dotenv').config();
 
-// --- CONFIGURAÇÃO DO APP ---
+// --- CONFIGURAÇÃO DO APP E SERVIDOR ---
 const app = express();
+const server = http.createServer(app); // Cria um servidor HTTP usando o app Express
+const io = new Server(server, {        // Inicia o Socket.IO "em cima" do servidor HTTP
+  cors: {
+    origin: "*", // Permite conexões de qualquer origem
+    methods: ["GET", "POST"]
+  }
+});
+
 const port = process.env.PORT || 3000;
 
 // --- CONEXÃO COM O BANCO DE DADOS POSTGRESQL ---
@@ -26,6 +36,14 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
+// --- LÓGICA DO SOCKET.IO ---
+io.on('connection', (socket) => {
+  console.log('Um usuário se conectou via WebSocket:', socket.id);
+
+  socket.on('disconnect', () => {
+    console.log('Usuário desconectou:', socket.id);
+  });
+});
 
 // --- DADOS TEMPORÁRIOS ---
 const admins = [{ 
@@ -34,7 +52,6 @@ const admins = [{
     password: process.env.ADMIN_PASSWORD || "admin123", 
     role: "master" 
 }];
-
 
 // --- Configuração do Multer ---
 const storage = multer.diskStorage({
@@ -57,44 +74,60 @@ const upload = multer({ storage: storage });
 
 // --- ROTAS DO CLIENTE ---
 
-// ROTA ATUALIZADA PARA USAR O BANCO DE DADOS
 app.post('/register/client', async (req, res) => {
   const { name, email, password, cpf, phoneNumber, city } = req.body;
-
-  // 1. Validação de entrada
   if (!name || !email || !password || !cpf || !phoneNumber || !city) {
     return res.status(400).json({ message: "Todos os campos são obrigatórios." });
   }
-
   const client = await pool.connect();
   try {
-    // 2. Segurança: Hashear a senha antes de salvar no banco
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
-
-    // 3. Inserir o novo cliente no banco de dados
     const result = await client.query(
       'INSERT INTO clients (name, email, password, cpf, phoneNumber, city) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
       [name, email, hashedPassword, cpf, phoneNumber, city]
     );
-
     const newClient = result.rows[0];
     console.log("Novo cliente cadastrado no BANCO DE DADOS:", newClient);
-    
-    // Remove a senha do objeto antes de enviar de volta para o app
     delete newClient.password;
-
     res.status(201).json({ message: "Cadastro realizado com sucesso!", user: newClient });
-
   } catch (error) {
     console.error('Erro ao cadastrar cliente:', error);
-    // Verifica se o erro é de violação de chave única (email ou cpf duplicado)
-    if (error.code === '23505') { // Código de erro do PostgreSQL para unique_violation
+    if (error.code === '23505') {
       return res.status(409).json({ message: "Email ou CPF já cadastrado." });
     }
     res.status(500).json({ message: "Erro interno do servidor." });
   } finally {
-    client.release(); // Sempre libera o cliente de volta para o pool
+    client.release();
+  }
+});
+
+// ROTA ATUALIZADA para salvar a corrida E avisar os motoristas
+app.post('/client/request-service', async (req, res) => {
+  const { clientId, startLocation, endLocation, paymentMethod, requestType } = req.body;
+  if (!clientId || !startLocation || !endLocation) {
+    return res.status(400).json({ message: "Dados da corrida incompletos." });
+  }
+  const client = await pool.connect();
+  try {
+    const result = await client.query(
+      `INSERT INTO rides (client_id, start_location, end_location, payment_method, request_type, value, status) 
+       VALUES ($1, $2, $3, $4, $5, $6, 'PENDING') RETURNING *`,
+      [clientId, startLocation, endLocation, paymentMethod, requestType, 7.0]
+    );
+    const newRide = result.rows[0];
+    console.log(`Nova solicitação de ${requestType} pelo cliente ${clientId}:`, newRide);
+
+    // AVISO EM TEMPO REAL PARA TODOS OS CONECTADOS
+    io.emit('nova_corrida', newRide); 
+    console.log(`Evento 'nova_corrida' emitido com os dados:`, newRide);
+
+    res.status(201).json({ message: "Solicitação enviada com sucesso.", ride: newRide });
+  } catch (error) {
+    console.error('Erro ao solicitar corrida:', error);
+    res.status(500).json({ message: "Erro interno do servidor." });
+  } finally {
+    client.release();
   }
 });
 
@@ -115,67 +148,36 @@ app.get('/driver/rides', (req, res) => {
     return res.status(501).json({ message: "Rota em construção." });
 });
 
-app.post('/client/request-service', (req, res) => {
-    return res.status(501).json({ message: "Rota em construção." });
-});
-
 app.get('/ride/:rideId/status', (req, res) => {
     return res.status(501).json({ message: "Rota em construção." });
 });
-
-// ... (Restante das rotas em construção)
 
 
 // --- FUNÇÃO PARA CRIAR TABELAS (SE NÃO EXISTIREM) ---
 const createTables = async () => {
   const client = await pool.connect();
   try {
-    // Tabela de Usuários (Motoristas)
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(100) NOT NULL,
-        cpf VARCHAR(14) UNIQUE NOT NULL,
-        cidade VARCHAR(100),
-        email VARCHAR(100) UNIQUE NOT NULL,
-        password VARCHAR(255) NOT NULL,
-        phoneNumber VARCHAR(20),
-        profilePhotoUrl VARCHAR(255),
-        status VARCHAR(20) DEFAULT 'pendente',
-        cnhPhotoUrl VARCHAR(255),
-        motoDocUrl VARCHAR(255)
+        id SERIAL PRIMARY KEY, name VARCHAR(100) NOT NULL, cpf VARCHAR(14) UNIQUE NOT NULL, cidade VARCHAR(100),
+        email VARCHAR(100) UNIQUE NOT NULL, password VARCHAR(255) NOT NULL, phoneNumber VARCHAR(20),
+        profilePhotoUrl VARCHAR(255), status VARCHAR(20) DEFAULT 'pendente', cnhPhotoUrl VARCHAR(255), motoDocUrl VARCHAR(255)
       );
     `);
-
-    // Tabela de Clientes
     await client.query(`
       CREATE TABLE IF NOT EXISTS clients (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(100) NOT NULL,
-        cpf VARCHAR(14) UNIQUE NOT NULL,
-        city VARCHAR(100),
-        email VARCHAR(100) UNIQUE NOT NULL,
-        password VARCHAR(255) NOT NULL,
-        phoneNumber VARCHAR(20)
+        id SERIAL PRIMARY KEY, name VARCHAR(100) NOT NULL, cpf VARCHAR(14) UNIQUE NOT NULL, city VARCHAR(100),
+        email VARCHAR(100) UNIQUE NOT NULL, password VARCHAR(255) NOT NULL, phoneNumber VARCHAR(20)
       );
     `);
-
-     // Tabela de Corridas
     await client.query(`
       CREATE TABLE IF NOT EXISTS rides (
-        id SERIAL PRIMARY KEY,
-        client_id INT REFERENCES clients(id),
-        driver_id INT REFERENCES users(id) NULL,
-        start_location VARCHAR(255) NOT NULL,
-        end_location VARCHAR(255) NOT NULL,
-        payment_method VARCHAR(50),
-        request_type VARCHAR(50),
-        value NUMERIC(10, 2),
-        status VARCHAR(20) DEFAULT 'PENDING',
+        id SERIAL PRIMARY KEY, client_id INT REFERENCES clients(id), driver_id INT REFERENCES users(id) NULL,
+        start_location VARCHAR(255) NOT NULL, end_location VARCHAR(255) NOT NULL, payment_method VARCHAR(50),
+        request_type VARCHAR(50), value NUMERIC(10, 2), status VARCHAR(20) DEFAULT 'PENDING',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
-    
     console.log('Tabelas verificadas/criadas com sucesso.');
   } catch (err) {
     console.error('Erro ao criar as tabelas:', err);
@@ -184,9 +186,8 @@ const createTables = async () => {
   }
 };
 
-
 // --- INICIALIZAÇÃO DO SERVIDOR ---
-app.listen(port, () => {
+server.listen(port, () => { // CORRIGIDO: Usando server.listen em vez de app.listen
     console.log(`Servidor rodando na porta ${port}`);
     createTables();
 });
