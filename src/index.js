@@ -160,15 +160,18 @@ app.post('/admin/drivers/:id/reprove', async (req, res) => {
 
 
 // --- ROTAS DO MOTORISTA ---
+// **INÍCIO DA CORREÇÃO**
 app.post('/register/driver', upload.fields([
     { name: 'cnhPhoto', maxCount: 1 }, { name: 'motoDoc', maxCount: 1 }, { name: 'profilePhoto', maxCount: 1 }
 ]), async (req, res) => {
-    const { name, email, password, cpf, phoneNumber, cidade } = req.body;
+    // Adiciona age e maritalStatus
+    const { name, email, password, cpf, phoneNumber, cidade, age, maritalStatus } = req.body;
     const cnhPhoto = req.files['cnhPhoto']?.[0];
     const motoDoc = req.files['motoDoc']?.[0];
     const profilePhoto = req.files['profilePhoto']?.[0];
 
-    if (!name || !cpf || !email || !password || !cnhPhoto || !motoDoc || !profilePhoto) {
+    // Adiciona os novos campos na validação
+    if (!name || !cpf || !email || !password || !cnhPhoto || !motoDoc || !profilePhoto || !age || !maritalStatus) {
         return res.status(400).json({ message: "Todos os campos e fotos são obrigatórios." });
     }
 
@@ -181,14 +184,16 @@ app.post('/register/driver', upload.fields([
         const motoDocUrl = `${baseUrl}/uploads/${motoDoc.filename}`;
         const profilePhotoUrl = `${baseUrl}/uploads/${profilePhoto.filename}`;
 
+        // Atualiza a query de inserção para incluir os novos campos
         await client.query(
-            `INSERT INTO users (name, email, password, cpf, phoneNumber, cidade, cnhPhotoUrl, motoDocUrl, profilePhotoUrl, status) 
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pendente')`,
-            [name, email, hashedPassword, cpf, phoneNumber, cidade, cnhPhotoUrl, motoDocUrl, profilePhotoUrl]
+            `INSERT INTO users (name, email, password, cpf, phoneNumber, cidade, age, maritalStatus, cnhPhotoUrl, motoDocUrl, profilePhotoUrl, status) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pendente')`,
+            [name, email, hashedPassword, cpf, phoneNumber, cidade, age, maritalStatus, cnhPhotoUrl, motoDocUrl, profilePhotoUrl]
         );
         
         res.status(201).json({ message: "Cadastro recebido! Seu perfil está em análise." });
     } catch (error) {
+        console.error('Erro no cadastro de motorista:', error); // Adiciona um log mais detalhado
         if (error.code === '23505') {
             return res.status(409).json({ message: "Email ou CPF já cadastrado." });
         }
@@ -197,6 +202,7 @@ app.post('/register/driver', upload.fields([
         client.release();
     }
 });
+// **FIM DA CORREÇÃO**
 
 app.get('/driver/rides', async (req, res) => {
     const client = await pool.connect();
@@ -263,35 +269,28 @@ app.post('/register/client', async (req, res) => {
     }
 });
 
-// ROTA DO CLIENTE CORRIGIDA
 app.post('/client/request-service', async (req, res) => {
     const { clientId, startLocation, endLocation, paymentMethod, requestType } = req.body;
     
-    // Verifica se os campos obrigatórios foram enviados
     if (!clientId || !startLocation || !endLocation) {
         return res.status(400).json({ message: "Dados da corrida incompletos." });
     }
 
-    // **INÍCIO DA CORREÇÃO**
-    // Define valores padrão para campos que podem não ser enviados pelo app
     const finalPaymentMethod = paymentMethod || 'Não informado';
     const finalRequestType = requestType || 'Padrão';
-    const rideValue = 7.0; // Define o valor padrão da corrida aqui
-    // **FIM DA CORREÇÃO**
+    const rideValue = 7.0;
 
     const client = await pool.connect();
     try {
         const result = await client.query(
             `INSERT INTO rides (client_id, start_location, end_location, payment_method, request_type, value, status) 
             VALUES ($1, $2, $3, $4, $5, $6, 'PENDING') RETURNING *`,
-            // Usa as variáveis com valores padrão na query
             [clientId, startLocation, endLocation, finalPaymentMethod, finalRequestType, rideValue]
         );
         const newRide = result.rows[0];
-        io.emit('nova_corrida', newRide); // Notifica os motoristas
+        io.emit('nova_corrida', newRide);
         res.status(201).json({ message: "Solicitação enviada com sucesso.", ride: newRide });
     } catch (error) {
-        // Adiciona um log mais detalhado para facilitar a depuração no futuro
         console.error('Erro ao solicitar corrida:', error);
         res.status(500).json({ message: "Erro interno do servidor." });
     } finally {
@@ -329,6 +328,8 @@ app.get('/ride/:rideId/status', async (req, res) => {
 const createTables = async () => {
     const client = await pool.connect();
     try {
+        // **INÍCIO DA CORREÇÃO**
+        // Adiciona as colunas 'age' e 'maritalStatus' na tabela de usuários
         await client.query(`
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -338,6 +339,8 @@ const createTables = async () => {
                 cpf VARCHAR(14) UNIQUE NOT NULL,
                 phoneNumber VARCHAR(20),
                 cidade VARCHAR(100),
+                age VARCHAR(10),
+                maritalStatus VARCHAR(50),
                 cnhPhotoUrl VARCHAR(255),
                 motoDocUrl VARCHAR(255),
                 profilePhotoUrl VARCHAR(255),
@@ -345,6 +348,7 @@ const createTables = async () => {
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         `);
+        // **FIM DA CORREÇÃO**
         await client.query(`
             CREATE TABLE IF NOT EXISTS clients (
                 id SERIAL PRIMARY KEY,
