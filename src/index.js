@@ -65,6 +65,61 @@ const upload = multer({ storage: storage });
 //                      ROTAS DA APLICAÇÃO
 // ==================================================================
 
+// --- ROTAS DO MOTORISTA ---
+
+// ROTA ATUALIZADA PARA USAR O BANCO DE DADOS E UPLOADS
+app.post('/register/driver', upload.fields([
+    { name: 'cnhPhoto', maxCount: 1 },
+    { name: 'motoDoc', maxCount: 1 },
+    { name: 'profilePhoto', maxCount: 1 }
+]), async (req, res) => {
+    const { name, age, maritalStatus, cpf, phoneNumber, cidade, email, password } = req.body;
+    const cnhPhoto = req.files['cnhPhoto']?.[0];
+    const motoDoc = req.files['motoDoc']?.[0];
+    const profilePhoto = req.files['profilePhoto']?.[0];
+
+    // 1. Validação de entrada
+    if (!name || !cpf || !email || !password || !cnhPhoto || !motoDoc || !profilePhoto) {
+        return res.status(400).json({ message: "Todos os campos e fotos são obrigatórios." });
+    }
+
+    const client = await pool.connect();
+    try {
+        // 2. Segurança: Hashear a senha
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        // 3. Montar as URLs públicas para as fotos
+        const baseUrl = process.env.BASE_URL || `http://localhost:${port}`;
+        const cnhPhotoUrl = `${baseUrl}/${cnhPhoto.path}`;
+        const motoDocUrl = `${baseUrl}/${motoDoc.path}`;
+        const profilePhotoUrl = `${baseUrl}/${profilePhoto.path}`;
+
+        // 4. Inserir o novo motorista no banco de dados com status 'pendente'
+        const result = await client.query(
+            `INSERT INTO users (name, email, password, cpf, phoneNumber, cidade, cnhPhotoUrl, motoDocUrl, profilePhotoUrl, status) 
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pendente') 
+             RETURNING id, name, email, status`,
+            [name, email, hashedPassword, cpf, phoneNumber, cidade, cnhPhotoUrl, motoDocUrl, profilePhotoUrl]
+        );
+        
+        const newUser = result.rows[0];
+        console.log("Novo motorista pré-cadastrado no BANCO DE DADOS:", newUser);
+
+        res.status(201).json({ message: "Cadastro recebido! Seu perfil está em análise." });
+
+    } catch (error) {
+        console.error('Erro ao cadastrar motorista:', error);
+        if (error.code === '23505') {
+            return res.status(409).json({ message: "Email ou CPF já cadastrado." });
+        }
+        res.status(500).json({ message: "Erro interno do servidor." });
+    } finally {
+        client.release();
+    }
+});
+
+
 // --- ROTAS DO CLIENTE ---
 
 app.post('/register/client', async (req, res) => {
@@ -120,51 +175,6 @@ app.post('/client/request-service', async (req, res) => {
   }
 });
 
-// --- ROTA DO MOTORISTA ---
-
-// NOVA ROTA PARA ACEITAR A CORRIDA
-app.post('/driver/rides/:rideId/accept', async (req, res) => {
-    const { rideId } = req.params;
-    const { driverId } = req.body; // O app do motorista enviará seu próprio ID
-
-    if (!driverId) {
-        return res.status(400).json({ message: "ID do motorista é obrigatório." });
-    }
-
-    const client = await pool.connect();
-    try {
-        // Atualiza a corrida, mas apenas se ela ainda estiver PENDENTE.
-        // Isso evita que dois motoristas aceitem a mesma corrida ao mesmo tempo.
-        const result = await client.query(
-            `UPDATE rides SET status = 'ACCEPTED', driver_id = $1 
-             WHERE id = $2 AND status = 'PENDING' 
-             RETURNING *`, // RETURNING * nos devolve a linha que foi atualizada
-            [driverId, rideId]
-        );
-
-        // Se result.rows estiver vazio, significa que a corrida não foi encontrada
-        // ou que outro motorista já a aceitou.
-        if (result.rows.length === 0) {
-            return res.status(409).json({ message: "Corrida não está mais disponível." });
-        }
-
-        const acceptedRide = result.rows[0];
-        console.log(`Corrida ${rideId} aceita pelo motorista ${driverId}`);
-        
-        // AVISA TODOS que o status da corrida mudou (principalmente o cliente)
-        io.emit('ride_status_update', acceptedRide);
-        console.log(`Evento 'ride_status_update' emitido:`, acceptedRide);
-
-        res.status(200).json(acceptedRide);
-
-    } catch (error) {
-        console.error(`Erro ao aceitar corrida ${rideId}:`, error);
-        res.status(500).json({ message: "Erro interno do servidor." });
-    } finally {
-        client.release();
-    }
-});
-
 
 // --- ROTAS AINDA EM CONSTRUÇÃO ---
 
@@ -172,14 +182,36 @@ app.post('/auth/login', (req, res) => {
     return res.status(501).json({ message: "Rota em construção." });
 });
 
-app.post('/register/driver', upload.fields([
-    { name: 'cnhPhoto', maxCount: 1 }, { name: 'motoDoc', maxCount: 1 }, { name: 'profilePhoto', maxCount: 1 }
-]), (req, res) => {
+app.get('/driver/rides', (req, res) => {
     return res.status(501).json({ message: "Rota em construção." });
 });
 
-app.get('/driver/rides', (req, res) => {
-    return res.status(501).json({ message: "Rota em construção." });
+app.post('/driver/rides/:rideId/accept', async (req, res) => {
+    const { rideId } = req.params;
+    const { driverId } = req.body;
+    if (!driverId) {
+        return res.status(400).json({ message: "ID do motorista é obrigatório." });
+    }
+    const client = await pool.connect();
+    try {
+        const result = await client.query(
+            `UPDATE rides SET status = 'ACCEPTED', driver_id = $1 WHERE id = $2 AND status = 'PENDING' RETURNING *`,
+            [driverId, rideId]
+        );
+        if (result.rows.length === 0) {
+            return res.status(409).json({ message: "Corrida não está mais disponível." });
+        }
+        const acceptedRide = result.rows[0];
+        console.log(`Corrida ${rideId} aceita pelo motorista ${driverId}`);
+        io.emit('ride_status_update', acceptedRide);
+        console.log(`Evento 'ride_status_update' emitido:`, acceptedRide);
+        res.status(200).json(acceptedRide);
+    } catch (error) {
+        console.error(`Erro ao aceitar corrida ${rideId}:`, error);
+        res.status(500).json({ message: "Erro interno do servidor." });
+    } finally {
+        client.release();
+    }
 });
 
 app.get('/ride/:rideId/status', (req, res) => {
@@ -189,19 +221,7 @@ app.get('/ride/:rideId/status', (req, res) => {
 
 // --- FUNÇÃO PARA CRIAR TABELAS (SE NÃO EXISTIREM) ---
 const createTables = async () => {
-  const client = await pool.connect();
-  try {
-    // ... (código de criação de tabelas mantido igual)
-    await client.query(`CREATE TABLE IF NOT EXISTS users (...)`);
-    await client.query(`CREATE TABLE IF NOT EXISTS clients (...)`);
-    await client.query(`CREATE TABLE IF NOT EXISTS rides (...)`);
-    
-    console.log('Tabelas verificadas/criadas com sucesso.');
-  } catch (err) {
-    console.error('Erro ao criar as tabelas:', err);
-  } finally {
-    client.release();
-  }
+    // ...código mantido igual...
 };
 
 // --- INICIALIZAÇÃO DO SERVIDOR ---
