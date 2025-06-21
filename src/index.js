@@ -115,14 +115,11 @@ app.post('/auth/login', async (req, res) => {
 
 
 // ==================================================================
-//                      ROTAS DO ADMIN (NOVO BLOCO)
+//                      ROTAS DO ADMIN
 // ==================================================================
-
-// ROTA NOVA: Admin busca todos os motoristas
 app.get('/admin/drivers', async (req, res) => {
     const client = await pool.connect();
     try {
-        // Seleciona todos os dados relevantes dos motoristas, ordenando pelos mais recentes
         const result = await client.query('SELECT id, name, email, cpf, phoneNumber, cidade, cnhPhotoUrl, motoDocUrl, profilePhotoUrl, status, created_at FROM users ORDER BY created_at DESC');
         res.status(200).json(result.rows);
     } catch (error) {
@@ -133,7 +130,6 @@ app.get('/admin/drivers', async (req, res) => {
     }
 });
 
-// ROTA NOVA: Admin aprova motorista
 app.post('/admin/drivers/:id/approve', async (req, res) => {
     const { id } = req.params;
     const client = await pool.connect();
@@ -148,7 +144,6 @@ app.post('/admin/drivers/:id/approve', async (req, res) => {
     }
 });
 
-// ROTA NOVA: Admin reprova motorista
 app.post('/admin/drivers/:id/reprove', async (req, res) => {
     const { id } = req.params;
     const client = await pool.connect();
@@ -203,7 +198,6 @@ app.post('/register/driver', upload.fields([
     }
 });
 
-// ROTA FINALIZADA: Busca corridas pendentes
 app.get('/driver/rides', async (req, res) => {
     const client = await pool.connect();
     try {
@@ -217,7 +211,6 @@ app.get('/driver/rides', async (req, res) => {
     }
 });
 
-// ROTA FINALIZADA: Motorista aceita a corrida
 app.post('/driver/rides/:rideId/accept', async (req, res) => {
     const { rideId } = req.params;
     const { driverId } = req.body;
@@ -270,39 +263,51 @@ app.post('/register/client', async (req, res) => {
     }
 });
 
+// ROTA DO CLIENTE CORRIGIDA
 app.post('/client/request-service', async (req, res) => {
     const { clientId, startLocation, endLocation, paymentMethod, requestType } = req.body;
+    
+    // Verifica se os campos obrigatórios foram enviados
     if (!clientId || !startLocation || !endLocation) {
         return res.status(400).json({ message: "Dados da corrida incompletos." });
     }
+
+    // **INÍCIO DA CORREÇÃO**
+    // Define valores padrão para campos que podem não ser enviados pelo app
+    const finalPaymentMethod = paymentMethod || 'Não informado';
+    const finalRequestType = requestType || 'Padrão';
+    const rideValue = 7.0; // Define o valor padrão da corrida aqui
+    // **FIM DA CORREÇÃO**
+
     const client = await pool.connect();
     try {
         const result = await client.query(
             `INSERT INTO rides (client_id, start_location, end_location, payment_method, request_type, value, status) 
             VALUES ($1, $2, $3, $4, $5, $6, 'PENDING') RETURNING *`,
-            [clientId, startLocation, endLocation, paymentMethod, requestType, 7.0]
+            // Usa as variáveis com valores padrão na query
+            [clientId, startLocation, endLocation, finalPaymentMethod, finalRequestType, rideValue]
         );
         const newRide = result.rows[0];
-        io.emit('nova_corrida', newRide);
+        io.emit('nova_corrida', newRide); // Notifica os motoristas
         res.status(201).json({ message: "Solicitação enviada com sucesso.", ride: newRide });
     } catch (error) {
+        // Adiciona um log mais detalhado para facilitar a depuração no futuro
+        console.error('Erro ao solicitar corrida:', error);
         res.status(500).json({ message: "Erro interno do servidor." });
     } finally {
         client.release();
     }
 });
 
-// ROTA FINALIZADA: Cliente busca o status da sua corrida
 app.get('/ride/:rideId/status', async (req, res) => {
     const { rideId } = req.params;
     const client = await pool.connect();
     try {
-        // Usamos LEFT JOIN para garantir que a corrida seja retornada mesmo se ainda não tiver um motorista
         const result = await client.query(
             `SELECT r.*, 
                     u.name AS driver_name, 
                     u.phoneNumber AS driver_phone_number,
-                    u.profilePhotoUrl AS driver_photo_url
+                    u.profilePhotoUrl AS driver_photo_url
              FROM rides r
              LEFT JOIN users u ON r.driver_id = u.id
              WHERE r.id = $1`,
@@ -322,8 +327,58 @@ app.get('/ride/:rideId/status', async (req, res) => {
 
 // --- FUNÇÃO PARA CRIAR TABELAS (SE NÃO EXISTIREM) ---
 const createTables = async () => {
-  // ... código mantido igual ...
+    const client = await pool.connect();
+    try {
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                password VARCHAR(255) NOT NULL,
+                cpf VARCHAR(14) UNIQUE NOT NULL,
+                phoneNumber VARCHAR(20),
+                cidade VARCHAR(100),
+                cnhPhotoUrl VARCHAR(255),
+                motoDocUrl VARCHAR(255),
+                profilePhotoUrl VARCHAR(255),
+                status VARCHAR(20) DEFAULT 'pendente',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS clients (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                password VARCHAR(255) NOT NULL,
+                cpf VARCHAR(14) UNIQUE NOT NULL,
+                phoneNumber VARCHAR(20),
+                city VARCHAR(100),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS rides (
+                id SERIAL PRIMARY KEY,
+                client_id INTEGER REFERENCES clients(id),
+                driver_id INTEGER REFERENCES users(id),
+                start_location VARCHAR(255) NOT NULL,
+                end_location VARCHAR(255) NOT NULL,
+                payment_method VARCHAR(50),
+                request_type VARCHAR(50),
+                value NUMERIC(10, 2),
+                status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+        console.log("Tabelas verificadas/criadas com sucesso.");
+    } catch (error) {
+        console.error("Erro ao criar as tabelas:", error);
+    } finally {
+        client.release();
+    }
 };
+
 
 // --- INICIALIZAÇÃO DO SERVIDOR ---
 server.listen(port, () => {
